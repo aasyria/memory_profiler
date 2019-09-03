@@ -1,6 +1,10 @@
 """Profile the memory usage of a Python program"""
 
 # .. we'll use this to pass it to the child script ..
+import datetime
+
+from numpy import unicode
+
 _CLEAN_GLOBALS = globals().copy()
 
 __version__ = '0.55.0'
@@ -28,7 +32,8 @@ else:
     from signal import SIGKILL
 import psutil
 
-
+global all_d
+all_d = 0.0
 # TODO: provide alternative when multiprocessing is not available
 try:
     from multiprocessing import Process, Pipe
@@ -131,6 +136,7 @@ def _get_memory(pid, backend, timestamps=False, include_children=False, filename
             return mem
 
     def ps_util_tool():
+
         # .. cross-platform but but requires psutil ..
         process = psutil.Process(pid)
         try:
@@ -141,7 +147,9 @@ def _get_memory(pid, backend, timestamps=False, include_children=False, filename
             mem = getattr(process, meminfo_attr)()[0] / _TWO_20
             if include_children:
                 mem +=  sum(_get_child_memory(process, meminfo_attr))
+
             if timestamps:
+
                 return mem, time.time()
             else:
                 return mem
@@ -213,6 +221,7 @@ class MemTimer(Process):
         self.mem_usage = [
             _get_memory(self.monitor_pid, self.backend, timestamps=self.timestamps,
                         include_children=self.include_children)]
+
         super(MemTimer, self).__init__(*args, **kw)
 
     def run(self):
@@ -234,7 +243,6 @@ class MemTimer(Process):
 
         self.pipe.send(self.mem_usage)
         self.pipe.send(self.n_measurements)
-
 
 def memory_usage(proc=-1, interval=.1, timeout=None, timestamps=False,
                  include_children=False, multiprocess=False, max_usage=False,
@@ -610,13 +618,15 @@ class CodeMap(dict):
             (sub_lines, start_line) = inspect.getsourcelines(code)
             linenos = range(start_line,
                             start_line + len(sub_lines))
-            self._toplevel.append((filename, code, linenos))
+            self._toplevel.append((filename, code, linenos,times))
             self[code] = {}
         else:
             self[code] = self[toplevel_code]
 
         for subcode in filter(inspect.iscode, code.co_consts):
             self.add(subcode, toplevel_code=toplevel_code)
+
+
 
     def trace(self, code, lineno, prev_lineno):
         memory = _get_memory(-1, self.backend, include_children=self.include_children,
@@ -629,16 +639,23 @@ class CodeMap(dict):
         prev_line_memory = prev_line_value[1] if prev_line_value else 0
         self[code][lineno] = (max(previous_inc, memory-prev_line_memory), max(memory, previous_memory))
 
+
+
     def items(self):
         """Iterate on the toplevel code blocks."""
-        for (filename, code, linenos) in self._toplevel:
+        for (filename, code, linenos,times) in self._toplevel:
+
             measures = self[code]
             if not measures:
                 continue  # skip if no measurement
-            line_iterator = ((line, measures.get(line)) for line in linenos)
+
+            line_iterator = ((line,measures.get(line)) for line in linenos)
             yield (filename, line_iterator)
 
 
+
+global times
+times = []
 class LineProfiler(object):
     """ A profiler that records the amount of memory for each line """
 
@@ -652,6 +669,9 @@ class LineProfiler(object):
         self.prevlines = []
         self.backend = choose_backend(kw.get('backend', None))
         self.prev_lineno = None
+        self.start1 = 0
+        self.start2 = 0
+
 
     def __call__(self, func=None, precision=1):
         if func is not None:
@@ -664,6 +684,8 @@ class LineProfiler(object):
             return f
         else:
             def inner_partial(f):
+                print("run 2")
+
                 return self.__call__(f, precision=precision)
 
             return inner_partial
@@ -671,6 +693,7 @@ class LineProfiler(object):
     def add_function(self, func):
         """ Record line profiling information for the given Python function.
         """
+        print("function found")
         try:
             # func_code does not exist in Python3
             code = func.__code__
@@ -683,14 +706,14 @@ class LineProfiler(object):
     def wrap_function(self, func):
         """ Wrap a function to profile it.
         """
-
         def f(*args, **kwds):
             self.enable_by_count()
             try:
-                return func(*args, **kwds)
+                result = func(*args, **kwds)
+                return result
+
             finally:
                 self.disable_by_count()
-
         return f
 
     def runctx(self, cmd, globals, locals):
@@ -719,26 +742,39 @@ class LineProfiler(object):
             if self.enable_count == 0:
                 self.disable()
 
+
     def trace_memory_usage(self, frame, event, arg):
         """Callback for sys.settrace"""
         if frame.f_code in self.code_map:
             if event == 'call':
                 # "call" event just saves the lineno but not the memory
                 self.prevlines.append(frame.f_lineno)
+                self.start1 = time.time()
+
             elif event == 'line':
+
+                self.start2 = time.time()
+                line_d = self.start2 - self.start1
+                global times
+                times.append(round(line_d,4))
+                self.start1 = self.start2
+
                 # trace needs current line and previous line
                 self.code_map.trace(frame.f_code, self.prevlines[-1], self.prev_lineno)
                 # saving previous line
                 self.prev_lineno = self.prevlines[-1]
                 self.prevlines[-1] = frame.f_lineno
+
             elif event == 'return':
                 lineno = self.prevlines.pop()
                 self.code_map.trace(frame.f_code, lineno, self.prev_lineno)
                 self.prev_lineno = lineno
+                end = time.time()
+                return_d = end - self.start1
+                times.append(round(return_d,4))
 
         if self._original_trace_function is not None:
             self._original_trace_function(frame, event, arg)
-
         return self.trace_memory_usage
 
     def trace_max_mem(self, frame, event, arg):
@@ -781,13 +817,13 @@ class LineProfiler(object):
         sys.settrace(self._original_trace_function)
 
 
+
 def show_results(prof, stream=None, precision=1):
     if stream is None:
         stream = sys.stdout
     template = '{0:>6} {1:>12} {2:>12}   {3:<}'
-
     for (filename, lines) in prof.code_map.items():
-        header = template.format('Line #', 'Mem usage', 'Increment',
+        header = template.format('Line #', 'Duration', 'Increment',
                                  'Line Contents')
 
         stream.write(u'Filename: ' + filename + '\n\n')
@@ -797,20 +833,30 @@ def show_results(prof, stream=None, precision=1):
         all_lines = linecache.getlines(filename)
 
         float_format = u'{0}.{1}f'.format(precision + 4, precision)
+        time_format = u'{0}.{1}f'.format(10,4)
+
         template_mem = u'{0:' + float_format + '} MiB'
+        template_time = u'{0:' + time_format + '} s'
+
+        i = 0
         for (lineno, mem) in lines:
             if mem:
                 inc = mem[0]
-                mem = mem[1]
-                mem = template_mem.format(mem)
+                d_time = times[i]
+                i+=1
                 inc = template_mem.format(inc)
+                d_time= template_time.format(d_time)
             else:
                 mem = u''
                 inc = u''
-            tmp = template.format(lineno, mem, inc, all_lines[lineno - 1])
-            stream.write(to_str(tmp))
+                d_time = u''
+            tmp = template.format(lineno, d_time, inc, all_lines[lineno - 1])
+            mem_usage = mem
+            stream.write(tmp)
         stream.write(u'\n\n')
 
+        stream.write("Memory usage  " + template_mem.format(mem_usage[1])+ "\n")
+        stream.write("Function call Duration  : " + template_time.format(all_d ) +"\n")
 
 def _func_exec(stmt, ns):
     # helper for magic_memit, just a function proxy for the exec
@@ -870,6 +916,7 @@ class MemoryProfilerMagics(Magics):
         from distutils.version import LooseVersion
         import IPython
         ipython_version = LooseVersion(IPython.__version__)
+
         if ipython_version < '0.11':
             from IPython.genutils import page
             from IPython.ipstruct import Struct
@@ -1031,7 +1078,6 @@ class MemoryProfilerMagics(Magics):
         # a garbage collection first
         import gc
         gc.collect()
-
         _func_exec(setup, self.shell.user_ns)
 
         mem_usage = []
@@ -1044,7 +1090,6 @@ class MemoryProfilerMagics(Magics):
                                max_usage=True,
                                include_children=include_children)
             mem_usage.append(tmp[0])
-
         result = MemitResult(mem_usage, baseline, repeat, timeout, interval,
                              include_children)
 
@@ -1101,7 +1146,11 @@ def profile(func=None, stream=None, precision=1, backend='psutil'):
         @wraps(func)
         def wrapper(*args, **kwargs):
             prof = LineProfiler(backend=backend)
+            start = time.time()
             val = prof(func)(*args, **kwargs)
+            end = time.time()
+            global all_d
+            all_d = end -start
             show_results(prof, stream=stream, precision=precision)
             return val
 
@@ -1147,6 +1196,7 @@ def choose_backend(new_backend=None):
 # script where @profile is used)
 def exec_with_profiler(filename, profiler, backend, passed_args=[]):
     from runpy import run_module
+
     builtins.__dict__['profile'] = profiler
     ns = dict(_CLEAN_GLOBALS,
               profile=profiler,
